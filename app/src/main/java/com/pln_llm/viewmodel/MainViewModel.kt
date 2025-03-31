@@ -76,7 +76,7 @@ class MainViewModel : ViewModel() {
             .create()
 
         Retrofit.Builder()
-            .baseUrl("http://10.1.176.72:8000/")
+            .baseUrl("http://192.168.1.11:8000/")
             .client(client)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()

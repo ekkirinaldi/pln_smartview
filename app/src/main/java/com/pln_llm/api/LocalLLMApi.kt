@@ -5,7 +5,7 @@ import retrofit2.http.Body
 import retrofit2.http.POST
 
 interface LocalLLMApi {
-    @POST("query")
+    @POST("/api/query")
     suspend fun getCompletion(
         @Body request: LocalLLMRequest
     ): Response<LocalLLMResponse>
