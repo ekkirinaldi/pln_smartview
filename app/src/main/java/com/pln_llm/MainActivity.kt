@@ -14,6 +14,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.pln_llm.config.Config
 import com.pln_llm.viewmodel.MainViewModel
+import android.widget.ScrollView
 
 class MainActivity : AppCompatActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -21,6 +22,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var transcribedText: TextView
     private lateinit var progressBar: ProgressBar
+    private lateinit var scrollView: ScrollView
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 123
@@ -37,6 +39,8 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         transcribedText = findViewById(R.id.transcribedText)
         progressBar = findViewById(R.id.progressBar)
+        scrollView = findViewById(R.id.scrollView)
+        scrollView.visibility = View.GONE
 
         setupObservers()
         setupClickListeners()
@@ -50,6 +54,8 @@ class MainActivity : AppCompatActivity() {
                 "Recording..." -> {
                     progressBar.visibility = View.GONE
                     recordButton.text = "Stop"
+                    scrollView.visibility = View.GONE
+                    transcribedText.text = ""
                 }
                 "Processing..." -> {
                     progressBar.visibility = View.VISIBLE
@@ -65,7 +71,10 @@ class MainActivity : AppCompatActivity() {
         viewModel.transcribedText.observe(this) { text ->
             transcribedText.text = text
             if (text.isNotEmpty()) {
+                scrollView.visibility = View.VISIBLE
                 progressBar.visibility = View.GONE
+            } else {
+                scrollView.visibility = View.GONE
             }
         }
 

@@ -10,16 +10,14 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pln_llm.api.*
-import com.pln_llm.config.Config
+import com.pln_llm.api.SmartGlassApi
+import com.pln_llm.api.SmartGlassResponse
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
-import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Retrofit
@@ -27,7 +25,10 @@ import retrofit2.converter.gson.GsonConverterFactory
 import java.io.File
 import java.io.FileOutputStream
 import com.google.gson.GsonBuilder
-import okhttp3.ResponseBody
+import com.pln_llm.util.WavAudioRecorder
+import android.util.Log
+import org.json.JSONObject
+import android.util.Base64
 
 class MainViewModel : ViewModel() {
     private val _status = MutableLiveData<String>()
@@ -44,30 +45,9 @@ class MainViewModel : ViewModel() {
     private var audioFile: File? = null
     private var isRecording = false
     private var context: Context? = null
+    private var wavAudioRecorder: WavAudioRecorder? = null
 
-    private val openAIApi: OpenAIApi by lazy {
-        val client = OkHttpClient.Builder()
-            .addInterceptor { chain ->
-                val request = chain.request().newBuilder()
-                    .addHeader("Authorization", "Bearer ${Config.openAiApiKey}")
-                    .build()
-                chain.proceed(request)
-            }
-            .build()
-
-        val gson = GsonBuilder()
-            .setLenient()
-            .create()
-
-        Retrofit.Builder()
-            .baseUrl("https://api.openai.com/")
-            .client(client)
-            .addConverterFactory(GsonConverterFactory.create(gson))
-            .build()
-            .create(OpenAIApi::class.java)
-    }
-
-    private val localLLMApi: LocalLLMApi by lazy {
+    private val smartGlassApi: SmartGlassApi by lazy {
         val client = OkHttpClient.Builder()
             .build()
 
@@ -76,11 +56,11 @@ class MainViewModel : ViewModel() {
             .create()
 
         Retrofit.Builder()
-            .baseUrl("http://192.168.1.11:8000/")
+            .baseUrl("https://dev-search.air.id/")
             .client(client)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
-            .create(LocalLLMApi::class.java)
+            .create(SmartGlassApi::class.java)
     }
 
     fun toggleRecording(context: Context) {
@@ -102,28 +82,18 @@ class MainViewModel : ViewModel() {
         try {
             audioFile = File(
                 context.getExternalFilesDir(Environment.DIRECTORY_MUSIC),
-                "audio_record_${System.currentTimeMillis()}.m4a"
+                "audio_record_${System.currentTimeMillis()}.wav"
             )
-
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                MediaRecorder()
-            }.apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setOutputFile(audioFile?.absolutePath)
-                prepare()
-                start()
-            }
-
+            Log.d(TAG, "Recording to file: ${audioFile?.absolutePath}")
+            wavAudioRecorder = WavAudioRecorder(audioFile!!)
+            wavAudioRecorder?.startRecording()
             isRecording = true
             _status.value = "Recording..."
             _transcribedText.value = ""
             _isProcessing.value = false
             showToast("Recording started")
         } catch (e: Exception) {
+            Log.e(TAG, "Error starting recording", e)
             _status.value = "Error starting recording: ${e.message}"
             showToast("Error starting recording: ${e.message}")
         }
@@ -131,17 +101,16 @@ class MainViewModel : ViewModel() {
 
     private fun stopRecording() {
         try {
-            mediaRecorder?.apply {
-                stop()
-                release()
-            }
-            mediaRecorder = null
+            wavAudioRecorder?.stopRecording()
+            Log.d(TAG, "Stopped recording. File: ${audioFile?.absolutePath}")
+            wavAudioRecorder = null
             isRecording = false
             _status.value = "Processing..."
             _isProcessing.value = true
             showToast("Recording stopped, processing audio...")
             processAudio()
         } catch (e: Exception) {
+            Log.e(TAG, "Error stopping recording", e)
             _status.value = "Error stopping recording: ${e.message}"
             _isProcessing.value = false
             showToast("Error stopping recording: ${e.message}")
@@ -152,148 +121,71 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 audioFile?.let { file ->
-                    _status.value = "Converting speech to text..."
-                    
-                    // Log file details only if it's very small or large
+                    Log.d(TAG, "Preparing to upload file: ${file.absolutePath}")
                     val fileSizeKB = file.length() / 1024
-                    if (fileSizeKB < 1 || fileSizeKB > 1000) {
+                    Log.d(TAG, "WAV file size: $fileSizeKB KB")
+                    if (fileSizeKB < 1 || fileSizeKB > 10000) {
                         showToast("Warning: Audio file size: $fileSizeKB KB")
                     }
-                    
-                    // Create request parts
-                    val requestFile = file.asRequestBody("audio/mpeg".toMediaType())
-                    val filePart = MultipartBody.Part.createFormData("file", file.name, requestFile)
-                    val modelPart = "whisper-1".toRequestBody("text/plain".toMediaType())
-                    
-                    val transcriptionResponse = withContext(Dispatchers.IO) {
+                    // Create request parts using PartMap for text fields
+                    val params = mutableMapOf<String, okhttp3.RequestBody>()
+                    params["model_type"] = "pln".toRequestBody("text/plain".toMediaType())
+                    val requestFile = file.asRequestBody("audio/wav".toMediaType())
+                    val filePart = MultipartBody.Part.createFormData("audio_file", file.name, requestFile)
+                    Log.d(TAG, "Uploading audio to API with PartMap...")
+                    val response = withContext(Dispatchers.IO) {
                         try {
-                            openAIApi.transcribeAudio(
-                                file = filePart,
-                                model = modelPart
+                            smartGlassApi.processAudio(
+                                params = params,
+                                audio_file = filePart
                             )
                         } catch (e: Exception) {
+                            Log.e(TAG, "Network/API error", e)
                             withContext(Dispatchers.Main) {
                                 _status.value = "Network error: ${e.message}"
                             }
                             throw e
                         }
                     }
-
-                    if (transcriptionResponse.isSuccessful) {
-                        val transcribedText = transcriptionResponse.body()?.text ?: ""
-                        if (transcribedText.isBlank()) {
+                    Log.d(TAG, "API response code: ${response.code()}")
+                    if (response.isSuccessful) {
+                        val responseBody = response.body()
+                        if (responseBody == null) {
+                            Log.e(TAG, "API returned empty response body")
                             withContext(Dispatchers.Main) {
-                                _status.value = "Error: Empty transcription"
+                                _status.value = "Error: Empty response"
                             }
                             return@let
                         }
-                        withContext(Dispatchers.Main) {
-                            _transcribedText.value = transcribedText
-                            _status.value = "Transcribed: $transcribedText"
-                        }
-
-                        val localLLMRequest = LocalLLMRequest(content = transcribedText)
-
-                        withContext(Dispatchers.Main) {
-                            _status.value = "Getting response from Local LLM..."
-                        }
-                        
-                        val llmResponse = withContext(Dispatchers.IO) {
-                            try {
-                                localLLMApi.getCompletion(localLLMRequest)
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    _status.value = "Local LLM network error: ${e.message}"
-                                }
-                                throw e
-                            }
-                        }
-
-                        if (llmResponse.isSuccessful) {
-                            val responseBody = llmResponse.body()
-                            if (responseBody == null) {
-                                withContext(Dispatchers.Main) {
-                                    _status.value = "Error: Empty response from Local LLM"
-                                }
-                                return@let
-                            }
-                            
-                            val answer = responseBody.answer
-                            val contexts = responseBody.relevant_contexts
-                            
-                            // Format the complete response with answer and contexts
-                            val formattedResponse = buildString {
-                                appendLine("Answer:")
-                                appendLine(answer)
-                                appendLine()
-                                appendLine("Relevant Contexts:")
-                                contexts.forEachIndexed { index, context ->
-                                    appendLine("${index + 1}. $context")
-                                }
-                            }
-                            
+                        val responseString = responseBody.string()
+                        Log.d(TAG, "API response string: $responseString")
+                        val json = JSONObject(responseString)
+                        val llmResult = json.optString("llm_result", "")
+                        val audioBase64 = json.optString("audio", "")
+                        if (llmResult.isNotEmpty()) {
                             withContext(Dispatchers.Main) {
-                                _status.value = "Local LLM Response:"
-                                _transcribedText.value = formattedResponse
+                                _transcribedText.value = llmResult
+                                _status.value = "Response received, playing audio..."
                             }
-
-                            // Add a delay to let user read the response
-                            delay(3000) // 3 seconds delay
-                            
-                            withContext(Dispatchers.Main) {
-                                _status.value = "Converting to speech..."
-                            }
-
-                            // Use only the answer for text-to-speech, not the contexts
-                            val ttsRequest = TextToSpeechRequest(input = answer)
-                            val audioResponse = withContext(Dispatchers.IO) {
-                                try {
-                                    openAIApi.textToSpeech(ttsRequest)
-                                } catch (e: Exception) {
-                                    withContext(Dispatchers.Main) {
-                                        _status.value = "TTS network error: ${e.message}"
-                                    }
-                                    throw e
-                                }
-                            }
-
-                            if (audioResponse.isSuccessful) {
-                                val responseBody = audioResponse.body()
-                                if (responseBody == null) {
-                                    withContext(Dispatchers.Main) {
-                                        _status.value = "Error: Empty TTS response"
-                                    }
-                                    return@let
-                                }
-                                withContext(Dispatchers.Main) {
-                                    _status.value = "Playing response..."
-                                }
-                                playAudio(responseBody.bytes())
-                            } else {
-                                val errorBody = audioResponse.errorBody()?.string()
-                                withContext(Dispatchers.Main) {
-                                    _status.value = "Text-to-speech failed: ${audioResponse.code()} - $errorBody"
-                                }
-                            }
+                        }
+                        if (audioBase64.isNotEmpty()) {
+                            val audioBytes = Base64.decode(audioBase64, Base64.DEFAULT)
+                            playAudio(audioBytes)
                         } else {
-                            val errorBody = llmResponse.errorBody()?.string()
-                            withContext(Dispatchers.Main) {
-                                _status.value = "Local LLM error: ${llmResponse.code()} - $errorBody"
-                            }
+                            Log.e(TAG, "No audio data in response")
                         }
                     } else {
-                        val errorBody = transcriptionResponse.errorBody()?.string()
+                        val errorBody = response.errorBody()?.string()
+                        Log.e(TAG, "API error: ${response.code()} - $errorBody")
                         withContext(Dispatchers.Main) {
-                            _status.value = "Transcription error: ${transcriptionResponse.code()} - $errorBody"
+                            _status.value = "Error: ${response.code()} - $errorBody"
                         }
                     }
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Error in processAudio", e)
                 withContext(Dispatchers.Main) {
                     _status.value = "Error: ${e.message}"
-                }
-            
-                withContext(Dispatchers.Main) {
                     _isProcessing.value = false
                 }
             }
@@ -302,7 +194,7 @@ class MainViewModel : ViewModel() {
 
     private fun playAudio(audioData: ByteArray) {
         try {
-            val tempFile = File.createTempFile("tts_audio", ".mp3")
+            val tempFile = File.createTempFile("response_audio", ".wav")
             FileOutputStream(tempFile).use { it.write(audioData) }
 
             mediaPlayer?.release()
@@ -329,5 +221,9 @@ class MainViewModel : ViewModel() {
         super.onCleared()
         mediaRecorder?.release()
         mediaPlayer?.release()
+    }
+
+    companion object {
+        private const val TAG = "MainViewModel"
     }
 } 

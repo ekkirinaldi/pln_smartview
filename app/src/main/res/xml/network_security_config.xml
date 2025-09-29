@@ -4,7 +4,8 @@
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">10.0.2.2</domain>
         <domain includeSubdomains="true">192.168.1.11</domain>
-        <domain includeSubdomains="true">10.1.176.72</domain>
+        <domain includeSubdomains="true">172.20.10.14</domain>
+        <domain includeSubdomains="true">dev-search.air.id</domain>
         <!-- Add your machine's IP address here if needed -->
     </domain-config>
 </network-security-config> 
